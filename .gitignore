@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# uv / virtualenv
+.venv/
+
+# OS
+.DS_Store
+
+# reports/figures tracked (shown in README).
