@@ -11,3 +11,6 @@ __pycache__/
 .DS_Store
 
 # reports/figures tracked (shown in README).
+*.pyc
+*.egg-info/
+build/
