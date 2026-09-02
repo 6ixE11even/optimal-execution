@@ -12,7 +12,7 @@ permanent impact  gamma  per unit traded; price diffuses with volatility sigma.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -34,7 +34,21 @@ class AlmgrenChriss:
 
     @property
     def eta_tilde(self) -> float:
-        return self.eta - 0.5 * self.gamma * self.tau
+        """Temporary impact net of the half-interval of permanent impact you avoid
+        by trading over the interval rather than at its start.
+
+        This has to stay positive: it is the denominator of k2, and Almgren-Chriss
+        assumes the cost functional is convex. Once 0.5*gamma*tau >= eta the model
+        says trading faster is free, which is not a regime the closed form covers.
+        """
+        value = self.eta - 0.5 * self.gamma * self.tau
+        if value <= 0:
+            raise ValueError(
+                f"eta_tilde = eta - gamma*tau/2 = {value:.6g} is not positive "
+                f"(eta={self.eta:.6g}, gamma={self.gamma:.6g}, tau={self.tau:.6g}). "
+                "Permanent impact is overwhelming temporary impact; the closed-form "
+                "solution does not apply. Lower gamma, raise eta, or shorten tau.")
+        return value
 
     def kappa(self) -> float:
         """Decay rate of the optimal trajectory. Bigger lambda/sigma -> bigger kappa
@@ -43,10 +57,21 @@ class AlmgrenChriss:
         return float(np.arccosh(1.0 + 0.5 * k2 * self.tau ** 2) / self.tau)
 
     def trajectory(self) -> tuple[np.ndarray, np.ndarray]:
-        """Times and holdings x_k (units still to sell). Exponential decay to 0."""
+        """Times and holdings x_k (units still to sell).
+
+        Risk-neutral limit. As lambda -> 0 so does kappa, and sinh(k(T-t))/sinh(kT)
+        becomes 0/0: the old code returned an all-NaN path for lam=0 and lost
+        precision for the small lambdas at the left end of the efficient frontier.
+        The limit is exactly the straight line (TWAP), which is the right answer -
+        with no risk aversion there is nothing to trade off against impact - so take
+        it explicitly rather than letting the floating point decide.
+        """
         k = self.kappa()
         t = np.arange(self.N + 1) * self.tau
-        x = self.X * np.sinh(k * (self.T - t)) / np.sinh(k * self.T)
+        if k * self.T < 1e-8:
+            x = self.X * (1.0 - t / self.T)
+        else:
+            x = self.X * np.sinh(k * (self.T - t)) / np.sinh(k * self.T)
         x[0], x[-1] = self.X, 0.0
         return t, x
 
@@ -67,10 +92,12 @@ class AlmgrenChriss:
 
     def twap(self) -> tuple[float, float]:
         """Cost and variance of the naive equal-slice (TWAP) schedule, for comparison."""
-        twap = replace(self, lam=0.0)
+        # eta_tilde does not depend on lam, so the old `replace(self, lam=0.0)` copy
+        # computed exactly self.eta_tilde. Dropped: it implied a dependence that is
+        # not there, which is the kind of thing that makes a reader distrust the rest.
         n = np.full(self.N, self.X / self.N)
         permanent = 0.5 * self.gamma * self.X ** 2
-        temporary = self.epsilon * np.sum(np.abs(n)) + (twap.eta_tilde / self.tau) * np.sum(n ** 2)
+        temporary = self.epsilon * np.sum(np.abs(n)) + (self.eta_tilde / self.tau) * np.sum(n ** 2)
         x = np.concatenate([[self.X], self.X - np.cumsum(n)])
         var = self.sigma ** 2 * self.tau * np.sum(x[1:] ** 2)
         return float(permanent + temporary), float(var)
