@@ -71,3 +71,26 @@ def test_degenerate_impact_is_rejected_with_a_useful_message():
     ac = AlmgrenChriss(X=1_000, T=5, N=20, sigma=2.0, eta=1e-8, gamma=1.0, lam=1e-6)
     with pytest.raises(ValueError, match="eta_tilde"):
         ac.expected_cost()
+
+
+def test_half_life_round_trips_through_lambda():
+    """lambda is unit-dependent; a half-life is not. Solving one for the other has
+    to land back where it started, or urgency is not actually specifiable."""
+    ac = AlmgrenChriss(X=1_000, T=5, N=20, sigma=1_494.0, eta=1_494.0 / 5_377,
+                       gamma=(1_494.0 / 5_377) / 10, epsilon=2.0, lam=1e-12)
+    for target in (0.25, 1.0, 2.5, 10.0):
+        lam = ac.lam_for_half_life(target)
+        tuned = replace(ac, lam=lam)
+        assert abs(np.log(2) / tuned.kappa() - target) < 1e-6
+
+
+def test_half_life_must_be_positive():
+    ac = AlmgrenChriss(X=1_000, T=5, N=20, sigma=2.0, eta=2.5e-6,
+                       gamma=2.5e-7, epsilon=0.0625, lam=1e-9)
+    for bad in (0.0, -1.0):
+        try:
+            ac.lam_for_half_life(bad)
+        except ValueError as e:
+            assert "half_life must be positive" in str(e)
+        else:
+            raise AssertionError(f"expected ValueError for half_life={bad}")

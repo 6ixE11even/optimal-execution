@@ -50,6 +50,24 @@ class AlmgrenChriss:
                 "solution does not apply. Lower gamma, raise eta, or shorten tau.")
         return value
 
+    def lam_for_half_life(self, half_life: float) -> float:
+        """The risk aversion that gives a trajectory with this half-life, in days.
+
+        lambda is dimensioned - it divides through by sigma^2 and eta_tilde, both
+        of which carry the instrument's price and volume units. A default that
+        looked sensible on a made-up book (price 100, one million units) puts the
+        half-life at 0.02 days on a real BTC calibration, i.e. liquidate at once.
+        A half-life is the same number whatever you are trading, so state urgency
+        that way and solve for lambda:
+
+            cosh(kappa*tau) = 1 + k2*tau^2/2,  k2 = lambda*sigma^2/eta_tilde
+        """
+        if half_life <= 0:
+            raise ValueError(f"half_life must be positive, got {half_life}")
+        kappa = np.log(2.0) / half_life
+        k2 = 2.0 * (np.cosh(kappa * self.tau) - 1.0) / self.tau ** 2
+        return float(k2 * self.eta_tilde / self.sigma ** 2)
+
     def kappa(self) -> float:
         """Decay rate of the optimal trajectory. Bigger lambda/sigma -> bigger kappa
         -> faster liquidation. Discrete form: cosh(kappa*tau) = 1 + 0.5 k2 tau^2."""
