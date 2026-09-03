@@ -78,6 +78,10 @@ is convex — its slope at any point is $-1/\lambda$.
 - Bertsimas, D. & Lo, A. (1998), *Optimal Control of Execution Costs*, Journal of Financial Markets 1(1).
 - Gatheral, J. (2010), *No-Dynamic-Arbitrage and Market Impact*, Quantitative Finance 10(7) — why impact functions can't be arbitrary.
 
+- Corwin, S. & Schultz, P. (2012), *A Simple Way to Estimate Bid-Ask Spreads from Daily High and Low Prices*, Journal of Finance 67(2).
+- Williams, R. (1992), *Simple Statistical Gradient-Following Algorithms for Connectionist Reinforcement Learning*, Machine Learning 8 — REINFORCE, and the baseline argument.
+- Nevmyvaka, Y., Feng, Y. & Kearns, M. (2006), *Reinforcement Learning for Optimized Trade Execution*, ICML.
+
 ## Real-data calibration (`data.py`)
 
 `σ`, average daily volume and the live touch spread are pulled from a **real Deribit
@@ -99,6 +103,97 @@ uv run python scripts/run_execution.py --offline           # illustrative, no ne
 uv run pytest                                              # trajectory + frontier invariants
 ```
 
+## Does a learned policy beat the closed form? (`rl.py`, `env.py`)
+
+The closed form is optimal under its own assumptions: arithmetic Brownian price, linear
+impact, no signal. Real books violate all three. So put a policy-gradient agent on real
+bars, give it the same objective, and see what it finds.
+
+**The data.** 207,361 five-minute BTC-PERPETUAL bars from Deribit, 2024-09-13 to
+2026-09-03, pulled by `bars.py` and cached to `data/bars/`. The chart endpoint caps a
+response at 5,001 bars and does not say so — it returns a shorter series with
+`status: ok` — so a single call for two years quietly covers seventeen days. The fetcher
+walks backwards in chunks.
+
+Those bars cut into **5,752 non-overlapping three-hour episodes** (36 bars). Non-overlapping
+because overlapping windows share most of a price path, and an agent graded on them is
+being graded on data it trained on. Each episode liquidates 10% of the preceding window's
+volume — a median order of 81 contracts, about $7.0M.
+
+**Calibration uses only bars that closed before the episode opens.** σ from the prior
+288 bars, volume likewise, and the half-spread from the Corwin–Schultz high–low estimator
+over the same lookback. A test enforces it: multiply every bar from the episode's first
+onwards by three and every parameter must come back identical.
+
+**The split is chronological, 70/30.** A random split would put a day's afternoon in
+training and its morning in test, and BTC's own autocorrelation would do the rest.
+
+| out of sample, 1,726 episodes | shortfall | risk penalty | objective | per-episode σ |
+|---|--:|--:|--:|--:|
+| TWAP | 1.499 | 0.047 | **1.546** | 49.2 |
+| Almgren–Chriss | 1.623 | 0.030 | 1.653 | 39.8 |
+| REINFORCE | 1.686 | 0.026 | 1.713 | **33.8** |
+
+*(basis points of order notional; the objective is shortfall + λ·risk, the same one the
+closed form minimises, so all three are graded by identical arithmetic)*
+
+![Learned and closed-form liquidation paths](reports/figures/rl_holdings.png)
+
+**The agent rediscovers Almgren–Chriss.** It was never shown the closed form, only real
+prices and a cost function, and it converged to a path with the same convex shape and a
+risk-adjusted cost 0.060 bps away — paired t of 0.10 across 1,726 out-of-sample episodes.
+That is not "close to"; it is statistically the same number.
+
+**Nothing beats TWAP, including the closed form.** Almgren–Chriss costs 0.107 bps more
+than equal slices out of sample, t = 0.38, and wins in 50.5% of episodes. A coin flip. The
+theory's edge over TWAP is real but it is 0.6% of the cost, and a single execution's outcome
+has a standard deviation of 49 bps. You are trying to hear one part in five hundred.
+
+![Per-episode objective differences](reports/figures/rl_objective_gap.png)
+
+**What the agent does win is dispersion.** 33.8 bps against TWAP's 49.2, a 31% reduction,
+for 0.167 bps of mean cost. Front-loading is worth paying for, and it is the same reason
+Almgren–Chriss front-loads; the agent just found it by trial.
+
+### The control variate is what made it trainable
+
+Almost all of an execution's realised cost is where the price went, and that part is common
+to every schedule facing the same path. Subtracting the TWAP schedule's cost *on the
+identical path* removes it, and cannot bias the gradient because the agent's action cannot
+move it.
+
+| REINFORCE, 20 epochs | objective (test) | risk penalty |
+|---|--:|--:|
+| trained on raw shortfall | 1.993 | 0.007 |
+| trained on the TWAP-differenced reward | **1.713** | 0.026 |
+
+Without it the agent gives up and dumps the inventory in the first few bars — a risk penalty
+of 0.007 bps is the signature of holding nothing. The gradient it was being asked to follow
+was a tenth of a basis point buried under eighty.
+
+![Learning curve](reports/figures/rl_learning_curve.png)
+
+The train/test gap in the table is not overfitting: the two benchmarks that learn nothing
+moved by 1.1 bps between the two periods as well. The second year was simply more expensive
+to trade. Having non-learning controls in the same table is the only reason that is visible.
+
+### Where this is soft
+
+The half-spread comes from Corwin–Schultz, which puts the median at 3.0 bps while
+BTC-PERPETUAL's live touch spread is 0.06 bps. The estimator reads intra-bar range as
+spread and overstates it badly on a tight, volatile instrument. It survives here only
+because every schedule liquidates the full order, so the spread term is ε·X for all three
+and cancels out of every comparison in this section. It would not survive a question about
+the *level* of cost, and Deribit's public history carries no quotes to fix it with.
+
+The gradients are hand-derived rather than autodiffed, and are checked against central
+differences in `tests/test_execution.py`.
+
+```bash
+uv run python scripts/train_rl_execution.py
+uv run python scripts/train_rl_execution.py --no-control-variate   # the ablation above
+```
+
 ## Structure
 
 ```
@@ -107,9 +202,15 @@ optimal-execution/
 │   ├── model.py      # Almgren-Chriss closed form (trajectory, cost, variance, TWAP)
 │   ├── frontier.py   # efficient frontier over risk-aversion
 │   ├── data.py       # calibrate sigma/ADV from real Deribit prices
-│   └── viz.py        # trajectory + frontier charts
-├── scripts/run_execution.py
-└── tests/            # liquidates fully, beats TWAP on E+lambda*Var, faster when risk-averse
+│   ├── bars.py       # paginated intraday bar history, cached to data/bars/
+│   ├── env.py        # one liquidation episode on a real price path
+│   ├── rl.py         # Gaussian-policy REINFORCE, gradients written out in numpy
+│   └── viz.py        # trajectory, frontier, learning curve, holdings, cost gap
+├── scripts/
+│   ├── run_execution.py        # closed form + efficient frontier
+│   └── train_rl_execution.py   # train the agent, grade it against AC and TWAP
+├── data/bars/        # cached real bars (207,361 five-minute BTC-PERPETUAL)
+└── tests/            # 18 checks: no look-ahead, hand-derived gradients vs finite differences
 ```
 
 ---
